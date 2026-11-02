@@ -1,0 +1,56 @@
+name: Build
+# Builds esp32sim (mikroverk/esp32sim, MIT) at a pinned commit as WebAssembly, with the START A BIT board (patch/),
+# and packs it with the classic ESP32 mask ROM (espressif/esp-rom-elfs, Apache-2.0) and MicroPython for the ESP32
+# (micropython.org, MIT). A tag v* also makes a release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+env:
+  ESP32SIM: 9fdeb323837d090b038a1036d2f344566546d466
+  MICROPYTHON: ESP32_GENERIC-20260824-v1.29.0.bin
+  MICROPYTHON_SHA256: e67ad6015a0a504c1fec9aa9bbf589d0432ed28e62546f4f8dd8a147f8bd95f6
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - name: esp32sim at its pinned commit, with our board
+        run: |
+          git clone https://github.com/mikroverk/esp32sim.git esp32sim
+          git -C esp32sim checkout "$ESP32SIM"
+          python3 patch/apply.py esp32sim
+      - name: Rust 1.98.1 for WebAssembly (the version esp32sim was measured with)
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+          rustup default 1.98.1
+      - name: The WebAssembly module
+        run: cd esp32sim && tools/wasm-build.sh
+      - name: The mask ROM and MicroPython
+        run: |
+          cd esp32sim && tools/fetch-rom-elfs.sh web/wasm/fw && cd ..
+          curl -fsSL --retry 5 -o "$MICROPYTHON" "https://micropython.org/resources/firmware/$MICROPYTHON"
+          echo "$MICROPYTHON_SHA256  $MICROPYTHON" | sha256sum -c
+      - name: Pack
+        run: |
+          mkdir dist
+          gzip -9 -c esp32sim/web/wasm/esp32sim.wasm > dist/esp32sim.wasm.gz
+          gzip -9 -c esp32sim/web/wasm/fw/esp32_rev300_rom.elf > dist/esp32_rev300_rom.elf.gz
+          gzip -9 -c "$MICROPYTHON" > dist/micropython-esp32-v1.29.0.bin.gz
+          cp esp32sim/LICENSE dist/LICENSE-esp32sim
+          cp README.md dist/
+          (cd esp32sim && git archive --format=tar.gz -o ../dist/esp32sim-source.tar.gz HEAD && git diff > ../dist/startabit.patch)
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+      - uses: actions/upload-artifact@v5
+        with:
+          name: esp32sim-wasm
+          path: dist/
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file README.md
